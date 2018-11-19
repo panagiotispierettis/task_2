@@ -1,0 +1,223 @@
+<?php
+
+function ppdemo_membership_civicrm_postSave_civicrm_contribution($dao){
+
+  $contribution_invoice_id = $dao->invoice_id;
+
+  $transaction_id = 0;
+  if( preg_match('/^\d+\_dc$/',$contribution_invoice_id) ){
+    $transaction_id = substr($contribution_invoice_id,0,-3);
+  }
+
+  $transaction = null;
+  if( !empty($transaction_id) && ppdemo_membership_valid_id($transaction_id) ){
+    $transaction = commerce_payment_transaction_load($transaction_id);
+  }
+
+  $membership_info = array();
+  if( !empty($transaction->order_id) ){
+    $membership_info = ppdemo_membership_get_membership_info($transaction->order_id);
+  }
+
+  if( !empty($membership_info) ){
+    $membership_info['contact_id'] = $dao->contact_id;
+    $result = ppdemo_membership_grant_membership($membership_info);
+  }
+
+}
+
+function ppdemo_membership_get_membership_info($order_id){
+
+  if( !ppdemo_membership_valid_id($order_id) ){
+    return false;
+  }
+
+  $order = commerce_order_load($order_id);
+  if(empty($order) ){
+    return false;
+  }
+
+  $membership_info = array();
+  $product_line_item_types = commerce_product_line_item_types();
+  $order_wrapper = entity_metadata_wrapper('commerce_order',$order);
+  $order_line_items = $order_wrapper->commerce_line_items;
+  foreach ($order_line_items as $line_item) {
+    $line_item_type = $line_item->type->value();
+    if( in_array($line_item_type,$product_line_item_types) ){
+      $commerce_product = $line_item->commerce_product->value();
+      $membership_info = ppdemo_membership_product_membership_info($commerce_product);
+      if( !empty($membership_info) ){
+        break;
+      }
+    }
+  }
+
+  return $membership_info;
+
+}
+
+function ppdemo_membership_product_membership_info($product){
+
+  if( !isset($product->field_grant_membership) || !isset($product->field_membership_type) ){
+    return false;
+  }
+
+  $commerce_product_wrapper = entity_metadata_wrapper('commerce_product',$product);
+
+  $grant_membership = $commerce_product_wrapper->field_grant_membership->value();
+  if($grant_membership!=='1'){
+    return false;
+  }
+
+  $membership_type = $commerce_product_wrapper->field_membership_type->value();
+  if( !isset($membership_type->field_membership_type_id) ){
+    return false;
+  }
+
+  $membership_type_wrapper = entity_metadata_wrapper('taxonomy_term',$membership_type);
+  $membership_type_id = $membership_type_wrapper->field_membership_type_id->value();
+  if( !ppdemo_membership_valid_id($membership_type_id) ){
+    return false;
+  }
+
+  $membership_info = array(
+    'type_id' => $membership_type_id,
+    'start_date' => date('Y-m-d')
+  );
+
+  $start_date_field_value = $commerce_product_wrapper->field_membership_start_date->value();
+  $start_date = ppdemo_membership_format_date($start_date_field_value);
+  if($start_date!==false){
+    $membership_info['start_date'] = $start_date;
+  }
+
+  return $membership_info;
+
+}
+
+function ppdemo_membership_grant_membership($membership_info){
+
+  $result = array(
+    'is_error' => 1,
+    'error_message' => 'Invalid Parameters'
+  );
+
+  $required_info = array(
+    'contact_id'=>'id',
+    'type_id'=>'id',
+    'start_date'=>'date'
+  );
+
+  if(  !is_array($membership_info) || count($membership_info) < count($required_info)  ){
+    return $result;
+  }
+
+  $valid_info = true;
+
+  foreach ($required_info as $info_name => $info_type) {
+
+    if( empty($membership_info[$info_name]) ) {
+      $valid_info = false;
+    }
+    else if($info_type=='id'){
+      if( !ppdemo_membership_valid_id($membership_info[$info_name]) ){
+        $valid_info = false;
+      }
+    }
+    else if($info_type=='date'){
+      if( !ppdemo_membership_valid_date($membership_info[$info_name]) ){
+        $valid_info = false;
+      }
+    }
+
+  }
+
+  if(!$valid_info){
+    return $result;
+  }
+
+  $params = array(
+    'contact_id' => $membership_info['contact_id'],
+    'membership_type_id' => $membership_info['type_id'],
+    'join_date' => date('Y-m-d'),
+    'start_date' => $membership_info['start_date'],
+    'source' => 'Commerce Purchase',
+    'is_ovveride' => 1
+  );
+
+  try{
+    $result = civicrm_api3('Membership','create',$params);
+  }
+  catch(CiviCRM_API3_Exception $e){
+    return array(
+      'is_error' => 0,
+      'error_message' => $e->getMessage(),
+      'error_code' => $e->getErrorCode()
+    );
+  }
+
+  return $result;
+
+}
+
+function ppdemo_membership_form_commerce_product_ui_product_form_alter(&$form,&$form_state,$form_id){
+
+  if(isset($form['field_membership_start_date'])){
+    $form['#validate'][] = "ppdemo_membership_product_form_validate";
+  }
+
+}
+
+function ppdemo_membership_product_form_validate($form,&$form_state){
+
+  if( !empty($form_state['values']['field_membership_start_date'][LANGUAGE_NONE][0]['value']) ){
+    $formatted  = ppdemo_membership_format_date($form_state['values']['field_membership_start_date'][LANGUAGE_NONE][0]['value']);
+    $valid = ppdemo_membership_valid_date($formatted);
+    if(!$valid){
+      form_set_error('field_membership_start_date', t('Invalid start date'));
+    }
+  }
+
+}
+
+function ppdemo_membership_valid_id($id){
+
+  if( preg_match('/^\d+$/',$id) ){
+    return true;
+  }
+
+  return false;
+
+}
+
+function ppdemo_membership_format_date($date){
+
+  if( empty($date) || !is_string($date) ){
+    return false;
+  }
+
+  $time = strtotime($date);
+
+  if($time!==false){
+    return date('Y-m-d',$time);
+  }
+
+  return false;
+
+}
+
+function ppdemo_membership_valid_date($date){
+
+  $date_format = '/^20[0-9][0-9]\-[0|1][0-9]\-[0-3][0-9]$/';
+  if( empty($date) || !is_string($date) || !preg_match($date_format,$date) ){
+    return false;
+  }
+
+  $date_parts = explode('-',$date);
+  if(count($date_parts)==3){
+    return checkdate($date_parts[1],$date_parts[2],$date_parts[0]);
+  }
+
+  return false;
+
+}

@@ -1,0 +1,8 @@
+name = Ppdemo Membership
+description = Create a membership when a contribution is made that contains commerce transaction
+core = 7.x
+
+dependencies[] = commerce_order
+dependencies[] = commerce_product
+dependencies[] = commerce_payment
+dependencies[] = civicrm
